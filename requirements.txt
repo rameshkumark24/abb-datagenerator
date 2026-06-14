@@ -1,0 +1,7 @@
+# nexops-data-generator dependencies
+#
+# Stage 1 (simulator.py + ConsolePublisher) is STANDARD LIBRARY ONLY.
+# It uses only json, random, time and datetime - nothing to install here.
+#
+# Stage 2 MQTT: uncomment the line below to enable the MqttPublisher.
+# paho-mqtt>=1.6

@@ -11,6 +11,48 @@ reactors, etc.), including slow *predictive* degradation faults that drift below
 the static alarm limit before they trip — the centrepiece for demonstrating
 early anomaly detection.
 
+## Quick start (Windows + Docker)
+
+New to all this? Follow these steps exactly. **MQTT** is just a messaging
+system: a *broker* (the post office) receives messages and forwards them to
+anyone who subscribed. Here the **publisher** sends telemetry, the **broker**
+relays it, and the **subscriber** prints what it receives.
+
+**One-time setup**
+
+1. Install **Docker Desktop** (https://www.docker.com/products/docker-desktop)
+   and **start it** — wait until its whale icon says "Docker Desktop is running".
+   Docker is what runs the broker for us.
+2. Install Python dependencies (in any PowerShell window, from this folder):
+   ```powershell
+   pip install -r requirements.txt
+   ```
+
+**Run the demo** — open **3 separate PowerShell windows** in this folder and run
+one script in each, **in this order**:
+
+| Window | Command                    | What it does                          |
+|--------|----------------------------|---------------------------------------|
+| 1      | `.\start-broker.ps1`       | starts the MQTT broker (the post office) |
+| 2      | `.\start-subscriber.ps1`   | listens and prints incoming telemetry |
+| 3      | `.\start-publisher.ps1`    | generates and publishes telemetry     |
+
+> **Firewall popup:** the first time, Windows may show a **"Windows Defender
+> Firewall"** dialog asking to allow Docker/Python network access. Click
+> **Allow access** — otherwise the broker can't be reached.
+>
+> **"running scripts is disabled" error?** Run this once, then retry:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+
+**Success looks like:** Window 2 (the subscriber) starts printing telemetry
+records, one per line, each tagged with a per-machine topic such as
+`[nexops/refinery/telemetry/compressor] {"Machine": "Compressor", ...}`.
+
+**When you're done:** press **CTRL+C** in windows 2 and 3, then run
+`.\stop-broker.ps1` to shut down and remove the broker container.
+
 ## Components
 
 | File              | Role                                                            |

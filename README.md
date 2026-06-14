@@ -96,12 +96,72 @@ Pulls records from the simulator and prints each as a JSON line via the default
 interval, broker settings) lives in the `CONFIG` block at the top of
 `publisher.py`.
 
-## Stage 2: enable MqttPublisher (not done yet)
+## Stage 2: Running with MQTT
 
-`MqttPublisher` in `publisher.py` is currently a **stub** — method signatures
-and `TODO` comments only, with no real broker connection. To enable it later:
+The `MqttPublisher` is now fully implemented. It publishes each record to a
+**per-machine topic** derived from the base topic plus the slugified machine
+name:
 
-1. Uncomment `paho-mqtt` in `requirements.txt` and `pip install -r requirements.txt`.
-2. Implement the `TODO(Stage 2)` blocks in `MqttPublisher` (connect / publish / close).
-3. Set the broker target in the CONFIG block: `MQTT_HOST`, `MQTT_PORT`, `MQTT_TOPIC`.
-4. Set `PUBLISHER = "mqtt"`.
+```
+nexops/refinery/telemetry/<machine_name_lowercased_with_underscores>
+```
+
+e.g. `nexops/refinery/telemetry/cooling_tower`. Subscribe to
+`nexops/refinery/telemetry/#` to receive every machine. Records are published
+with **QoS 1**.
+
+### 0. Start a broker (pick ONE)
+
+**(a) Docker Mosquitto** — easiest if you have Docker:
+
+```bash
+docker run -it -p 1883:1883 eclipse-mosquitto
+```
+
+**(b) No-Docker fallback** — pure-Python broker via amqtt (use this if Docker
+is not installed):
+
+```bash
+pip install amqtt
+amqtt          # starts a broker listening on 0.0.0.0:1883
+```
+
+> The CONFIG defaults (`MQTT_HOST=localhost`, `MQTT_PORT=1883`) match both
+> brokers above, so no config change is needed.
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Three-terminal run sequence
+
+| Terminal | Command                                   | Purpose                |
+|----------|-------------------------------------------|------------------------|
+| 1        | start broker (Docker or amqtt, see above) | the MQTT broker        |
+| 2        | `python subscriber_test.py`               | verify messages arrive |
+| 3        | `PUBLISHER=mqtt python publisher.py`       | publish the feed       |
+
+On Windows PowerShell, terminal 3 is:
+
+```powershell
+$env:PUBLISHER="mqtt"; python publisher.py
+```
+
+(You can also just set `PUBLISHER = "mqtt"` in the CONFIG block of
+`publisher.py` instead of using the env var.)
+
+### What success looks like
+
+- Terminal 3 (publisher) prints `[mqtt] connected to localhost:1883`.
+- Terminal 2 (subscriber) starts printing telemetry records, one per line,
+  each prefixed with its per-machine topic, e.g.:
+
+  ```
+  [nexops/refinery/telemetry/compressor] {"Machine": "Compressor", "Timestamp": ...}
+  [nexops/refinery/telemetry/pump] {"Machine": "Pump", ...}
+  ```
+
+If the broker is not running, the publisher exits with a clear "could not reach
+broker" message; start the broker first.

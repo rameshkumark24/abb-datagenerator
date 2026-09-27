@@ -1,15 +1,47 @@
-# nexops-data-generator
+# NexOps data generator (abb-datagenerator)
 
 A stand-in **ABB gateway** for the NexOps prototype. Real ABB 800xA gateways
 stream live process telemetry and alarms off refinery equipment; this service
 fakes that feed so the rest of NexOps can be built and demoed without the real
 hardware.
 
-It produces a realistic, noisy, **escalating** stream of sensor readings and
-alarms across 16 refinery assets (compressors, pumps, boilers, fired heaters,
-reactors, etc.), including slow *predictive* degradation faults that drift below
-the static alarm limit before they trip — the centrepiece for demonstrating
-early anomaly detection.
+It produces a realistic, noisy stream of sensor readings and alarms across
+**26 machines in 4 plant zones (A–D)** — compressors, pumps, boilers, fired
+heaters, reactors and more — including slow *predictive* degradation faults that
+drift below the static alarm limit before they trip (the centrepiece for
+demonstrating early anomaly detection) and a little realistic nuisance noise.
+
+It can deliver the feed three ways (`PUBLISHER`):
+
+| Mode | Where records go | Use it for |
+|------|------------------|------------|
+| `console` (default) | stdout, one JSON line per record | local inspection |
+| `mqtt` | an MQTT broker, per-machine topics | the NexOps docker-compose stack / a real broker |
+| `http` | `POST https://<backend>/ingest/telemetry` | **cloud deployments** — no broker needed |
+
+## Deploy (cloud, e.g. Render)
+
+The generator runs anywhere Python 3.11+ or Docker runs. With `PUBLISHER=http`
+it needs no broker: it POSTs each record to the NexOps backend over HTTPS.
+
+1. On the **backend**, set `INGEST_TOKEN=<long random secret>` and
+   `EMBEDDED_SIMULATOR=0` (so the backend stops generating its own feed).
+2. Deploy this repo:
+   - **Build:** `pip install -r requirements.txt` (or use the `Dockerfile`)
+   - **Start:** `python publisher.py`
+   - **Env:** `PUBLISHER=http`,
+     `INGEST_URL=https://<backend>/ingest/telemetry`,
+     `INGEST_TOKEN=<same secret>`, and on a host that requires an open port
+     (a Render *web service*) nothing else — it serves `GET /healthz` on `$PORT`.
+     On a *background worker* no port is needed.
+3. Check it: `GET /healthz` on the generator shows `published` / `failed`
+   counters and the last error, and the backend's `/healthz` shows
+   `machines_seen` growing.
+
+A wrong token or a backend without ingest enabled is logged once, clearly
+(`backend rejected INGEST_TOKEN` / `ingest disabled on backend`); a sleeping or
+restarting backend just drops ticks until it answers again.
+
 
 ## Quick start (Windows + Docker)
 
@@ -194,6 +226,24 @@ $env:PUBLISHER="mqtt"; python publisher.py
 (You can also just set `PUBLISHER = "mqtt"` in the CONFIG block of
 `publisher.py` instead of using the env var.)
 
+### Environment variables
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PUBLISHER` | `console` | `mqtt` to publish to a broker, `http` to POST to the backend's ingest endpoint |
+| `INGEST_URL` / `INGEST_TOKEN` | unset | `PUBLISHER=http`: `https://<backend>/ingest/telemetry` and the backend's `INGEST_TOKEN` |
+| `PORT` / `HEALTH_PORT` | unset | serve `GET /healthz` (publisher status) on this port — needed to run as a web service |
+| `MQTT_HOST` / `MQTT_PORT` | `localhost` / `1883` | broker address (e.g. `mosquitto` under docker compose) |
+| `MQTT_BASE_TOPIC` | `nexops/refinery/telemetry` | base topic; a per-machine suffix is added |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` / `MQTT_TLS` | unset | broker credentials / TLS for a secured broker |
+| `MQTT_CONNECT_WAIT_SECONDS` | `60` | keep retrying the first connection this long (broker still starting) |
+| `PUBLISH_INTERVAL_SECONDS` | `1` | delay between records |
+| `TOTAL_RECORDS` | unset (forever) | stop after this many records |
+
+A `Dockerfile` is included (defaults: `PUBLISHER=mqtt`, `MQTT_HOST=mosquitto`,
+matching the NexOps docker-compose stack; override `PUBLISHER=http` and the
+`INGEST_*` variables for cloud use).
+
 ### What success looks like
 
 - Terminal 3 (publisher) prints `[mqtt] connected to localhost:1883`.
@@ -205,5 +255,6 @@ $env:PUBLISHER="mqtt"; python publisher.py
   [nexops/refinery/telemetry/pump] {"Machine": "Pump", ...}
   ```
 
-If the broker is not running, the publisher exits with a clear "could not reach
-broker" message; start the broker first.
+If the broker is not reachable within `MQTT_CONNECT_WAIT_SECONDS` (default 60s),
+the publisher exits with a clear "could not reach broker" message; start the
+broker first.

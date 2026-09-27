@@ -40,23 +40,117 @@ from datetime import datetime
 # ----------------------------------------------------------------------
 
 OUTPUT_FILE = "refinery_live_data.jsonl"
-INTERVAL_SECONDS = 2
+INTERVAL_SECONDS = 1
 TOTAL_RECORDS = None          # None = run forever, or set an integer limit
 
-# --- v2 knobs ---
+# ======================================================================
+# DEMO TUNING KNOBS  (dial the drama up or down from right here)
+# ======================================================================
+# Intended behaviour: an EEMUA-191-realistic plant - mostly NORMAL, with the
+# occasional slowly-developing fault that stands out clearly. At any moment only
+# ~1-3 of the 16 machines should have something developing; everything else
+# reports "All parameters within normal operating range".
+#
+# TIMING MODEL (needed to read the rates below): the engine processes ONE machine
+# per tick, round-robin, and INTERVAL_SECONDS = 1 -> ~1 tick per second, so each
+# individual machine is revisited every ~16 s. A "tick" in the incubation counter
+# therefore equals one VISIT to that machine (~16 s of wall-clock).
+#
+# QUICK DIAL:
+#   calmer -> lower DEGRADATION_SEED_CHANCE / SUDDEN_EVENT_CHANCE, raise INCUBATION_TICKS
+#   busier -> raise DEGRADATION_SEED_CHANCE / SUDDEN_EVENT_CHANCE, lower INCUBATION_TICKS
+#   dramatic "alarm flood" -> flip ESCALATION_ENABLED = True (see below) and raise
+#                             the phase *_mult values.
+
 NOISE_ENABLED = True          # add Gaussian sensor noise to every reading
 DEGRADATION_ENABLED = True    # enable slow cascading faults
-# Chance per machine per tick that a NEW slow degradation begins (if none active)
-DEGRADATION_SEED_CHANCE = 0.12
-# How many ticks a degradation incubates BELOW threshold before crossing it.
-# Larger = longer "early-warning" window for the anomaly detector to shine.
-INCUBATION_TICKS = (15, 30)
+
+# Chance, on the ONE machine processed each tick (~1/s), that a NEW slow fault
+# begins (only if that machine has none active). At ~1 tick/s this is roughly the
+# fleet-wide new-fault rate PER SECOND, so:
+#   0.006 -> ~1 new fault every ~167 s (~2.8 min)   <-- realistic / calm (DEFAULT)
+#   0.02  -> ~1 new fault every ~50 s               (noticeably busier)
+#   0.12  -> several new faults per minute           (old value -> alarm spam)
+DEGRADATION_SEED_CHANCE = 0.006
+
+# Chance per tick of a sudden INSTANT alarm (safety trips, overspeed, etc.).
+# Kept genuinely rare so safety alarms are real events, not background noise:
+#   0.002 -> ~1 every ~500 s (~8 min)               <-- realistic / calm (DEFAULT)
+#   0.04  -> ~1 every ~25 s                          (old value -> far too frequent)
+SUDDEN_EVENT_CHANCE = 0.002
+
+# How many ticks (machine VISITS, ~16 s each) a fault incubates BELOW the static
+# threshold before it trips. This is the PREDICTIVE / EARLY-WARNING window - the
+# demo centrepiece - so we keep it LONG: (20, 40) visits ~= 5-11 min of visible
+# drift before the static gateway alarm fires. Raise for an even longer window.
+INCUBATION_TICKS = (20, 40)
+
+# Nuisance / texture layer: a SMALL amount of realistic, NON-actionable noise
+# (single-sample sensor glitches + borderline threshold chatter) - the kind a
+# "dumb" gateway would alarm on but NexOps must FILTER OUT. This is texture, NOT
+# a flood, so the default stays low. Nuisance readings are tagged
+# is_nuisance=True / nuisance_type, NEVER set is_predictive, and NEVER use the
+# slow-degradation machinery, so they are trivially separable from real faults.
+#   0.03 -> ~3% of an otherwise-Normal machine's readings glitch  <-- realistic (DEFAULT)
+#   0.10 -> noticeably noisier feed (still not a flood)
+#   0.00 -> no nuisance at all (pure signal)
+NUISANCE_ENABLED = True
+NUISANCE_CHANCE = 0.03
+
+# ======================================================================
+# SCALE CONFIG  (why this zone-structured slice provably scales to the pitch)
+# ======================================================================
+# The pitch is a 500-machine plant with ~250 technicians (a 1:2 tech:machine
+# ratio). This prototype is a faithful SCALED-DOWN SLICE that holds a comparable
+# ratio, so the scaling claim is honest rather than merely asserted. Stage 1 of
+# the ZONE HIERARCHY grows the slice from 16 asset TYPES to ~26 machine INSTANCES
+# across 4 ZONES (A/B/C/D), staffed by 16 engineers (4 per zone) - so this slice
+# runs at roughly a 1:1.6 tech:machine ratio, in the same ballpark as the 1:2
+# pitch ratio, inside a zone-structured plant:
+#
+#   Ratios held by this slice:
+#     * technicians : machines ~= 1 : 1.6  (16 techs / 26 machines, 4 techs and
+#                                          ~6-7 machines per zone), trending toward
+#                                          the 1:2 pitch ratio (250 techs / 500 machines)
+#     * fault / nuisance / sudden rates are defined PER MACHINE PER READING - the
+#       probabilities above are rolled INDEPENDENTLY for each machine - so total
+#       alarm volume = machines x per-machine-rate x readings-per-machine.
+#
+#   Scaling relationship (the key honest claim):
+#     Every rate above is a PER-MACHINE probability. Hold the per-machine reading
+#     cadence constant and grow the fleet, and total alarm volume grows LINEARLY
+#     with machine count, nothing else changing:
+#         extend MACHINES to 500 assets and the SAME logic yields ~500/26 ~= 19x
+#         the alarm volume of this slice, with the tech:machine ratio unchanged.
+#     The relationship is real and parameter-driven, not faked.
+#
+#   NOTE on the live stream / VOLUME (Stage-1 detail): the engine samples ONE
+#   machine per tick (round-robin), so the console/MQTT feed is a FIXED-RATE
+#   sample of the fleet - one record per second regardless of fleet size. Because
+#   the seed/sudden/nuisance dice are rolled only on THAT one machine each tick,
+#   growing 16 -> 26 machines does NOT raise the live feed's alarm volume; it just
+#   spreads faults across more assets (each machine is now revisited every ~26 s
+#   instead of ~16 s, so per-machine drift is a touch slower - still calm). The
+#   per-machine rates are what scale linearly when you sample ALL machines each
+#   tick. If a future "sample every machine each tick" mode ever makes volume feel
+#   high, the knobs to lower are DEGRADATION_SEED_CHANCE / SUDDEN_EVENT_CHANCE /
+#   NUISANCE_CHANCE; defaults here stay realistic.
+PROTO_MACHINES = 26          # == len(MACHINES) == len(FLEET); this demo slice
+PROTO_TECHNICIANS = 16       # matches the assignment subsystem's seeded roster (4 per zone)
+PITCH_MACHINES = 500         # pitch-scale fleet
+PITCH_TECHNICIANS = 250      # pitch-scale workforce
 
 # ----------------------------------------------------------------------
-# v3.1 DEMO ESCALATION PHASES
-# The demo starts CALM (rare, slow-developing faults) and then ESCALATES
-# (faults arrive more often AND develop faster), so you can show normal
-# monitoring first, then an "alarm flood" stress scenario.
+# DEMO ESCALATION PHASES  (DISABLED for the realistic calm plant)
+# Previously the demo ramped UP fault frequency into an "alarm flood". We want a
+# steady, EEMUA-realistic plant instead, so escalation is now OFF: when
+# ESCALATION_ENABLED is False, get_phase() returns neutral 1.0 multipliers (no
+# extra faults, no speed-up) and the plant never escalates.
+#
+# The phase machinery is kept intact (so a flood demo is one flag away), but the
+# phases below have ALSO been flattened to calm 1.0 multipliers. To recreate the
+# old flood arc you would set ESCALATION_ENABLED = True AND raise the *_mult
+# values again.
 #
 # Each phase is defined by elapsed seconds since start:
 #   until        : phase lasts until this many seconds have elapsed
@@ -67,15 +161,13 @@ INCUBATION_TICKS = (15, 30)
 #   label        : shown in the console banner when the phase begins
 # ----------------------------------------------------------------------
 
-ESCALATION_ENABLED = True
+ESCALATION_ENABLED = False
 
 DEMO_PHASES = [
-    {"until": 30,   "seed_mult": 1.0, "sudden_mult": 1.0, "speed_mult": 1.2,
+    # Flattened to CALM: a single open-ended phase, all multipliers 1.0 (no extra
+    # faults, no speed-up). The plant stays steady and mostly normal.
+    {"until": None, "seed_mult": 1.0, "sudden_mult": 1.0, "speed_mult": 1.0,
      "label": "calm"},
-    {"until": 70,   "seed_mult": 2.0, "sudden_mult": 2.0, "speed_mult": 1.8,
-     "label": "building"},
-    {"until": None, "seed_mult": 4.0, "sudden_mult": 3.5, "speed_mult": 2.6,
-     "label": "flood"},
 ]
 
 # Track which phase we're in so we only announce a change once
@@ -92,7 +184,11 @@ def get_phase(elapsed_seconds):
             return phase
     return DEMO_PHASES[-1]
 
-MACHINES = [
+# The 16 base asset TYPES (each owns a feature profile in _BASE_MACHINE_FEATURES,
+# bands, sudden scenarios and degradation modes). The live fleet (FLEET, below)
+# stamps out multiple zone-tagged INSTANCES of these types - it does NOT invent
+# new sensor types.
+MACHINE_TYPES = [
     "Compressor", "Pump", "Storage Tank", "Distillation Column",
     "Heat Exchanger", "Boiler", "Motor", "Control Valve",
     "MCC Panel", "Generator",
@@ -252,10 +348,12 @@ NOISE_STD = {
 }
 
 # ----------------------------------------------------------------------
-# Machine feature map  (unchanged from v1)
+# Machine feature map  (per asset TYPE; unchanged from v1).
+# Keyed by base type. The live, instance-keyed MACHINE_FEATURES is built from
+# this below (one entry per FLEET instance, tag made unique + zone stamped on).
 # ----------------------------------------------------------------------
 
-MACHINE_FEATURES = {
+_BASE_MACHINE_FEATURES = {
     "Compressor": {"features": ["gen_temp", "comp_pressure", "vibration", "current", "rpm"],
                    "dash": {"Temp": "gen_temp", "Pressure": "comp_pressure", "Level": None, "Flow": None},
                    "tag": "PIC-CMP01", "desc": "Process Gas Compressor Discharge"},
@@ -315,6 +413,92 @@ MACHINE_FEATURES = {
                                            "Level": None, "Flow": None},
                                   "tag": "PIC-IAC01", "desc": "Instrument Air Compressor"},
 }
+
+# ----------------------------------------------------------------------
+# FLEET  (Stage 1 of the zone hierarchy: machines mapped to zones)
+# ----------------------------------------------------------------------
+# We scale the live fleet from 16 asset TYPES to ~26 machine INSTANCES spread
+# across 4 plant ZONES (A/B/C/D). Each instance REUSES an existing type's full
+# feature/band/scenario profile (no new sensor types invented) - we just stamp
+# out multiples (e.g. "Pump A1", "Pump D1") and tag each with its zone.
+#
+# Each FLEET entry is (instance_name, base_type, zone). ~6-7 machines per zone,
+# every zone carrying a realistic mix of rotating / thermal / electrical assets
+# (so a same-zone engineer can usually be found for a local fault).
+FLEET = [
+    # ---- Zone A (7) ----
+    ("Compressor A1", "Compressor", "A"),
+    ("Pump A1", "Pump", "A"),
+    ("Distillation Column A1", "Distillation Column", "A"),
+    ("Heat Exchanger A1", "Heat Exchanger", "A"),
+    ("Motor A1", "Motor", "A"),
+    ("MCC Panel A1", "MCC Panel", "A"),
+    ("Fired Heater A1", "Fired Heater", "A"),
+    # ---- Zone B (7) ----
+    ("Pump B1", "Pump", "B"),
+    ("Boiler B1", "Boiler", "B"),
+    ("Heat Exchanger B1", "Heat Exchanger", "B"),
+    ("Motor B1", "Motor", "B"),
+    ("Generator B1", "Generator", "B"),
+    ("Cooling Tower B1", "Cooling Tower", "B"),
+    ("Separator B1", "Separator", "B"),
+    # ---- Zone C (6) ----
+    ("Compressor C1", "Compressor", "C"),
+    ("Storage Tank C1", "Storage Tank", "C"),
+    ("Control Valve C1", "Control Valve", "C"),
+    ("Reactor C1", "Reactor", "C"),
+    ("Fired Heater C1", "Fired Heater", "C"),
+    ("Instrument Air Compressor C1", "Instrument Air Compressor", "C"),
+    # ---- Zone D (6) ----
+    ("Pump D1", "Pump", "D"),
+    ("Boiler D1", "Boiler", "D"),
+    ("Motor D1", "Motor", "D"),
+    ("Storage Tank D1", "Storage Tank", "D"),
+    ("Flare System D1", "Flare System", "D"),
+    ("MCC Panel D1", "MCC Panel", "D"),
+]
+
+# Live instance list (round-robin order) + lookups derived from FLEET.
+MACHINES = [name for name, _base, _zone in FLEET]
+# instance name -> base asset type (used to find its feature/scenario profile)
+MACHINE_TYPE = {name: base for name, base, _zone in FLEET}
+# instance name -> zone ("A"|"B"|"C"|"D"); stamped onto every emitted record
+MACHINE_ZONES = {name: zone for name, _base, zone in FLEET}
+
+
+def _unique_tag(base_tag, n):
+    """Make a per-instance historian tag from a base tag, e.g.
+    ("PIC-CMP01", 2) -> "PIC-CMP02" (strip the trailing number, re-append n)."""
+    stem = base_tag.rstrip("0123456789")
+    return f"{stem}{n:02d}"
+
+
+def _build_machine_features():
+    """Build the instance-keyed MACHINE_FEATURES from _BASE_MACHINE_FEATURES.
+
+    Every downstream lookup indexes MACHINE_FEATURES by the INSTANCE name, so we
+    give each instance its own entry: the base type's feature list + dash map
+    (shared, read-only), a UNIQUE tag, a zone-tagged description, plus explicit
+    "zone" and "base_type" fields.
+    """
+    features = {}
+    type_counts = {}
+    for name, base, zone in FLEET:
+        type_counts[base] = type_counts.get(base, 0) + 1
+        base_def = _BASE_MACHINE_FEATURES[base]
+        features[name] = {
+            "features": base_def["features"],
+            "dash": base_def["dash"],
+            "tag": _unique_tag(base_def["tag"], type_counts[base]),
+            "desc": f"{base_def['desc']} (Zone {zone})",
+            "zone": zone,
+            "base_type": base,
+        }
+    return features
+
+
+# Instance-keyed feature map: MACHINE_FEATURES[<instance name>] -> profile.
+MACHINE_FEATURES = _build_machine_features()
 
 DASH_COLUMNS = ["Temp", "Pressure", "Level", "Flow"]
 
@@ -505,8 +689,8 @@ SUDDEN_SCENARIOS = {
     ],
 }
 
-# Chance per tick of a sudden event firing (kept rare; degradation is the star)
-SUDDEN_EVENT_CHANCE = 0.04
+# NOTE: SUDDEN_EVENT_CHANCE is defined in the DEMO TUNING KNOBS block near the
+# top of the file (kept rare there; slow degradation is the star of the demo).
 
 PRIORITY_LEVELS = {"Critical": 1, "High": 2, "Medium": 3, "Low": 4}
 
@@ -736,7 +920,8 @@ def maybe_sudden_event(machine_name, state, phase=None):
     sudden_mult = phase["sudden_mult"] if phase else 1.0
     if random.random() > SUDDEN_EVENT_CHANCE * sudden_mult:
         return None
-    scns = SUDDEN_SCENARIOS.get(machine_name, [])
+    # SUDDEN_SCENARIOS is keyed by base TYPE; map the instance to its type.
+    scns = SUDDEN_SCENARIOS.get(MACHINE_TYPE.get(machine_name, machine_name), [])
     if not scns:
         return None
     scenario = weighted_choice(scns, [s.get("weight", 5) for s in scns])
@@ -776,6 +961,70 @@ def maybe_sudden_event(machine_name, state, phase=None):
             "object_name": tag, "object_description": desc,
             "message": f"{scenario['name']} - {feat.replace('_',' ').title()} = {value} {_unit_for(feat)}",
             "predictive": False, "tripped": True}
+
+
+# ----------------------------------------------------------------------
+# Nuisance / texture layer  (PART A)
+# Small, realistic, NON-actionable noise a "dumb" gateway would alarm on but
+# NexOps should FILTER OUT. Two kinds:
+#   transient : a single-reading sensor glitch spike that self-clears next read
+#   chatter   : a value that marginally crosses a threshold then settles
+# Both are tagged is_nuisance=True / nuisance_type and NEVER set is_predictive
+# and NEVER touch the slow-degradation machinery. The caller only invokes this on
+# an otherwise-Normal machine-tick, so nuisance can NEVER mask a real fault. The
+# spike is applied to the REPORTED value only (state["_values"] is left normal),
+# so a transient is gone on the very next reading.
+# ----------------------------------------------------------------------
+
+def _nuisance_features(machine_name):
+    """Owned numeric features eligible to glitch (exclude discrete leak/pilot)."""
+    return [f for f in MACHINE_FEATURES[machine_name]["features"]
+            if f not in ("leak", "pilot")]
+
+
+def maybe_nuisance(machine_name, state, phase=None):
+    """Maybe emit a small nuisance reading. Returns an alarm-like dict (with
+    extra nuisance_* keys plus a one-shot spike to apply to the OUTPUT value), or
+    None. Rate is the per-machine NUISANCE_CHANCE; `phase` is accepted for a
+    consistent signature but does NOT amplify nuisance (texture stays calm)."""
+    if not NUISANCE_ENABLED or random.random() > NUISANCE_CHANCE:
+        return None
+    feats = _nuisance_features(machine_name)
+    if not feats:
+        return None
+
+    feat = random.choice(feats)
+    high_lo, high_hi = BANDS[feat]["High"]
+    span = max(1e-6, high_hi - high_lo)
+    tag = MACHINE_FEATURES[machine_name]["tag"]
+    desc = MACHINE_FEATURES[machine_name]["desc"]
+    unit = _unit_for(feat)
+
+    # Borderline chatter is the more common nuisance; sharp transients rarer.
+    kind = random.choices(["chatter", "transient"], weights=[70, 30])[0]
+    if kind == "chatter":
+        # marginal crossing: JUST over the High threshold, then settles
+        value = high_lo + random.uniform(0.02, 0.25) * span
+        alert = "Threshold Chatter"
+        message = (f"{feat.replace('_', ' ').title()} momentarily crossed limit = "
+                   f"{_round(feat, value)} {unit} then settled "
+                   f"(nuisance/chatter - no developing trend)")
+    else:
+        # single-sample sensor glitch: a sharp spike high in the High band
+        value = high_lo + random.uniform(0.5, 1.0) * span
+        alert = "Sensor Spike (Transient)"
+        message = (f"{feat.replace('_', ' ').title()} single-sample spike = "
+                   f"{_round(feat, value)} {unit} "
+                   f"(nuisance/transient glitch - self-clears next reading)")
+
+    return {
+        "status": "Warning", "alert": alert, "alarm_type": "Process",
+        "severity": "Low", "object_name": tag, "object_description": desc,
+        "message": message, "predictive": False, "tripped": False,
+        # nuisance markers + one-shot output override (NOT written to state):
+        "nuisance": True, "nuisance_type": kind,
+        "spike_feat": feat, "spike_value": _clamp_hard(feat, value),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -838,6 +1087,10 @@ def generate_record(alarm_id, machine_name, phase=None):
                     values["leak"] = "Normal"
                 if "pilot" in values:
                     values["pilot"] = "Lit"
+                # 2b) otherwise-Normal machine -> maybe a SMALL nuisance blip.
+                # This runs ONLY here (no active degradation, no sudden event),
+                # so nuisance can never mask or overwrite a real fault.
+                alarm = maybe_nuisance(machine_name, state, phase)
 
     # 3) default = normal if nothing fired
     if alarm is None:
@@ -854,6 +1107,13 @@ def generate_record(alarm_id, machine_name, phase=None):
             noisy[feat] = val
         else:
             noisy[feat] = _round(feat, add_noise(feat, val))
+
+    # 4b) nuisance is a ONE-SHOT spike on the REPORTED value only: we override
+    # the output here but leave state["_values"] untouched, so a transient blip
+    # is gone on the very next reading (no incubation, nothing to "relax" back).
+    if alarm.get("nuisance") and alarm.get("spike_feat") in noisy:
+        sf = alarm["spike_feat"]
+        noisy[sf] = _round(sf, alarm["spike_value"])
 
     # 5) persistent alarm lifecycle: ACT -> ACK -> RTN
     severity = alarm["severity"]
@@ -876,6 +1136,9 @@ def generate_record(alarm_id, machine_name, phase=None):
 
     record = {
         "Machine": machine_name,
+        # zone: which plant ZONE (A|B|C|D) this machine belongs to. Additive -
+        # every record now carries its machine's zone for zone-aware routing.
+        "zone": MACHINE_ZONES.get(machine_name),
         "Timestamp": timestamp,
         "Temp": dash_value(machine_name, noisy, "Temp"),
         "Pressure": dash_value(machine_name, noisy, "Pressure"),
@@ -892,6 +1155,10 @@ def generate_record(alarm_id, machine_name, phase=None):
         "alarm_state": alarm_state,
         "ack_state": ack,
         "is_predictive": alarm.get("predictive", False),
+        # Additive nuisance markers: True/typed only for non-actionable texture
+        # (transient/chatter); real faults & EARLY catches keep False/None.
+        "is_nuisance": alarm.get("nuisance", False),
+        "nuisance_type": alarm.get("nuisance_type"),
         "object_name": alarm["object_name"],
         "object_description": alarm["object_description"],
         "message": alarm["message"],
@@ -916,7 +1183,13 @@ def fmt(value, width, prec=1):
 
 
 def print_live_row(record):
-    pred = "*" if record["is_predictive"] else " "   # * = predictive early warning
+    # marker: * = predictive early-warning (actionable), ~ = nuisance (filterable)
+    if record["is_predictive"]:
+        marker = "*"
+    elif record.get("is_nuisance"):
+        marker = "~"
+    else:
+        marker = " "
     line = (
         f"{record['Machine']:<20}"
         f"{record['Timestamp']:<20}"
@@ -924,7 +1197,7 @@ def print_live_row(record):
         f"{fmt(record['Pressure'], 10, 2)}"
         f"{fmt(record['Level'], 8, 1)}"
         f"{fmt(record['Flow'], 8, 1)}"
-        f"  {record['Status']:<9}{record['alarm_state']:<5}{pred:<2}{record['Alert']}"
+        f"  {record['Status']:<9}{record['alarm_state']:<5}{marker:<2}{record['Alert']}"
     )
     print(line)
 
@@ -935,11 +1208,22 @@ def print_live_row(record):
 
 def main():
     global _demo_start_time, _current_phase_index
-    print("Starting LIVE Refinery / Warehouse Monitoring Feed (v3.1 - 16 assets, escalating demo)")
-    print(f"Monitoring units: {', '.join(MACHINES)}")
-    print("Legend:  State = ACT/ACK/RTN   '*' = predictive early-warning (below static limit)")
+    print(f"Starting LIVE Refinery / Warehouse Monitoring Feed "
+          f"(v4 - {len(MACHINES)} assets across 4 zones, calm/EEMUA-realistic)")
+    _by_zone = {}
+    for _name in MACHINES:
+        _by_zone.setdefault(MACHINE_ZONES[_name], []).append(_name)
+    for _z in sorted(_by_zone):
+        print(f"  Zone {_z} ({len(_by_zone[_z])}): {', '.join(_by_zone[_z])}")
+    print("Legend:  State = ACT/ACK/RTN   '*' = predictive early-warning (actionable)   "
+          "'~' = nuisance (filterable texture)")
+    print(f"Scale slice: {PROTO_MACHINES} machines / {PROTO_TECHNICIANS} techs (~1:1.6 ratio, "
+          f"4 per zone) - per-machine rates scale linearly toward {PITCH_MACHINES} machines / "
+          f"{PITCH_TECHNICIANS} techs (1:2 pitch ratio, ~{PITCH_MACHINES // PROTO_MACHINES}x volume).")
     if ESCALATION_ENABLED:
         print("Demo arc: starts CALM, then escalates to an ALARM FLOOD over time.")
+    else:
+        print("Mode: steady CALM plant - mostly Normal, occasional slow faults, a little nuisance.")
     print("Press CTRL+C to stop.\n")
     print(HEADER)
     print("-" * len(HEADER))

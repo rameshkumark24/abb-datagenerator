@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  smoke:
+    name: Simulator + publisher smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Console publisher emits valid records
+        run: |
+          TOTAL_RECORDS=30 PUBLISH_INTERVAL_SECONDS=0 python publisher.py \
+            | tail -n +2 > records.jsonl
+          python - <<'PY'
+          import json
+          rows = [json.loads(l) for l in open("records.jsonl")]
+          assert len(rows) == 30, len(rows)
+          required = {"Machine", "zone", "Timestamp", "Status", "features", "alarm_priority"}
+          for r in rows:
+              missing = required - r.keys()
+              assert not missing, missing
+          assert {r["zone"] for r in rows} == {"A", "B", "C", "D"}
+          print("ok:", len(rows), "records across zones", sorted({r["zone"] for r in rows}))
+          PY
+      - name: HTTP publisher reports a bad endpoint without crashing
+        run: |
+          PUBLISHER=http INGEST_URL=http://127.0.0.1:9/ingest/telemetry INGEST_TOKEN=x \
+            TOTAL_RECORDS=2 PUBLISH_INTERVAL_SECONDS=0 INGEST_TIMEOUT_SECONDS=2 \
+            python publisher.py | tee http.log
+          grep -q "publish failed" http.log
+      - name: Docker image builds
+        run: docker build -t abb-datagenerator .

@@ -1,5 +1,11 @@
 # Simulator output
 refinery_live_data.jsonl
 
-# Python bytecode cache
+# Python
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local environment
+.env
